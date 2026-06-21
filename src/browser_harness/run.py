@@ -85,7 +85,7 @@ def _cloud_auth_configured():
     try:
         auth.get_browser_use_api_key()
         return True
-    except auth.CloudAuthRequired:
+    except (auth.CloudAuthRequired, auth.AuthError, OSError):
         return False
 
 

@@ -61,8 +61,9 @@ def _load_config() -> dict:
 def _save_config(data: dict) -> None:
     path = _config_path()
     try:
+        parent_existed = path.parent.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
-        if platform.system() != "Windows":
+        if not parent_existed and platform.system() != "Windows":
             os.chmod(path.parent, 0o700)
         path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
         if platform.system() != "Windows":
@@ -84,11 +85,17 @@ def _env_disabled() -> bool:
     return any((os.environ.get(name) or "").lower() in {"0", "false", "no", "off"} for name in DISABLE_ENVS)
 
 
-def _install_id(config: dict | None = None) -> str:
+def _valid_install_id(raw) -> bool:
+    return isinstance(raw, str) and re.fullmatch(r"[0-9a-f-]{32,36}", raw) is not None
+
+
+def _install_id(config: dict | None = None, *, create: bool = True) -> str | None:
     config = config if config is not None else _load_config()
     raw = config.get("install_id")
-    if isinstance(raw, str) and re.fullmatch(r"[0-9a-f-]{32,36}", raw):
+    if _valid_install_id(raw):
         return raw
+    if not create:
+        return None
     install_id = str(uuid.uuid4())
     _save_config({**config, "install_id": install_id})
     return install_id
@@ -103,11 +110,12 @@ def is_enabled() -> bool:
 def status() -> dict:
     config = _load_config()
     env_disabled = _env_disabled()
+    enabled = not env_disabled and not bool(config.get("disabled"))
     return {
-        "enabled": not env_disabled and not bool(config.get("disabled")),
+        "enabled": enabled,
         "disabled_by_env": env_disabled,
         "disabled_by_config": bool(config.get("disabled")),
-        "install_id": _install_id(config),
+        "install_id": _install_id(config, create=enabled),
         "config_path": str(_config_path()),
     }
 

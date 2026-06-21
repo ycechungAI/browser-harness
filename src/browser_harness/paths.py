@@ -17,8 +17,9 @@ def home_dir() -> Path:
 
 
 def ensure_private_dir(path: Path) -> Path:
+    existed = path.exists()
     path.mkdir(parents=True, exist_ok=True)
-    if sys.platform != "win32":
+    if not existed and sys.platform != "win32":
         os.chmod(path, 0o700)
     return path
 
