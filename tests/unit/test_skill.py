@@ -30,6 +30,6 @@ def test_packaged_skill_frontmatter_is_valid_simple_yaml():
         metadata[key] = parsed
 
     assert metadata == {
-        "name": "browser-harness",
-        "description": "Always use browser-harness for any web interaction: automation, scraping, testing, or site/app work.",
+        "name": "browser-use",
+        "description": "Direct browser control via CDP for web interaction: automation, scraping, testing, screenshots, and site/app work.",
     }
