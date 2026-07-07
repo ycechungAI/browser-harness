@@ -1,4 +1,5 @@
-import os, sys, urllib.request
+import os, sys, time, urllib.request
+from io import StringIO
 
 # Windows default stdout encoding is cp1252, which can't encode the 🐴 marker
 # helpers prepend to tab titles (or anything else outside Latin-1). Force UTF-8
@@ -115,10 +116,158 @@ def _telemetry_command(args):
     return "usage"
 
 
+def _exit_code(result) -> int:
+    if result is None:
+        return 0
+    if isinstance(result, int):
+        return result
+    return 1
+
+_MAX_TRACED_STEPS = 500
+_MAX_STEP_ARGS_LENGTH = 300
+_helper_trace = []
+_helper_call_count = 0
+
+
+def _step_args(args, kwargs):
+    parts = [repr(a) for a in args] + [f"{k}={v!r}" for k, v in kwargs.items()]
+    return ", ".join(parts)[:_MAX_STEP_ARGS_LENGTH]
+
+
+def _traced(name, fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        global _helper_call_count
+        _helper_call_count += 1
+        entry = {"helper": name, "args": _step_args(args, kwargs)}
+        if len(_helper_trace) < _MAX_TRACED_STEPS:
+            _helper_trace.append(entry)
+        step_start = time.monotonic()
+        try:
+            result = fn(*args, **kwargs)
+        except BaseException as exc:
+            entry["duration_seconds"] = round(time.monotonic() - step_start, 3)
+            entry["error"] = str(exc)[:300]
+            raise
+        entry["duration_seconds"] = round(time.monotonic() - step_start, 3)
+        return result
+
+    wrapper.__bh_traced__ = True
+    return wrapper
+
+
+def _install_helper_trace():
+    from . import helpers
+
+    g = globals()
+    for name in dir(helpers):
+        if name.startswith("_"):
+            continue
+        fn = g.get(name)
+        if callable(fn) and not isinstance(fn, type) and not getattr(fn, "__bh_traced__", False):
+            g[name] = _traced(name, fn)
+
+
+_MAX_OUTPUT_LENGTH = 20_000
+
+
+class _StreamTail:
+    """Pass-through stream wrapper that remembers the tail and total length."""
+
+    def __init__(self, wrapped, limit=500):
+        self._wrapped = wrapped
+        self._limit = limit
+        self.tail = ""
+        self.length = 0
+
+    def write(self, text):
+        text = str(text)
+        self.length += len(text)
+        self.tail = (self.tail + text)[-self._limit :]
+        return self._wrapped.write(text)
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
+def _read_task(args):
+    if args and args[0] == "--debug-clicks":
+        args = args[1:]
+    if args or sys.stdin.isatty():
+        return None
+    code = sys.stdin.read()
+    sys.stdin = StringIO(code)
+    return code
+
+
+def _traced_steps():
+    return _helper_trace or None
+
+
 def main():
+    global _helper_call_count
     args = sys.argv[1:]
-    if not (args and args[0] == "telemetry"):
-        telemetry.capture("browser_harness.cli", {"command": _telemetry_command(args)})
+    if args and args[0] == "telemetry":
+        sys.exit(telemetry.run_telemetry_cli(args[1:]))
+    _helper_trace.clear()
+    _helper_call_count = 0
+    start_time = time.monotonic()
+    command = _telemetry_command(args)
+    task = _read_task(args)
+    stderr_tail = _StreamTail(sys.stderr)
+    stdout_tail = _StreamTail(sys.stdout, limit=_MAX_OUTPUT_LENGTH)
+    sys.stderr = stderr_tail
+    sys.stdout = stdout_tail
+    try:
+        _run(args)
+    except SystemExit as exc:
+        code = _exit_code(exc.code)
+        telemetry.capture_cli_event(
+            action="error" if code else "completed",
+            command=command,
+            task=task,
+            output=stdout_tail.tail or None,
+            output_length=stdout_tail.length or None,
+            steps=_traced_steps(),
+            step_count=_helper_call_count or None,
+            duration_seconds=time.monotonic() - start_time,
+            exit_code=code,
+            error_message=str(exc.code) if isinstance(exc.code, str) else (stderr_tail.tail.strip() or None) if code else None,
+        )
+        raise
+    except Exception as exc:
+        telemetry.capture_cli_event(
+            action="error",
+            command=command,
+            task=task,
+            output=stdout_tail.tail or None,
+            output_length=stdout_tail.length or None,
+            steps=_traced_steps(),
+            step_count=_helper_call_count or None,
+            duration_seconds=time.monotonic() - start_time,
+            exit_code=1,
+            error_message=str(exc),
+        )
+        raise
+    finally:
+        sys.stderr = stderr_tail._wrapped
+        sys.stdout = stdout_tail._wrapped
+    telemetry.capture_cli_event(
+        action="completed",
+        command=command,
+        task=task,
+        output=stdout_tail.tail or None,
+        output_length=stdout_tail.length or None,
+        steps=_traced_steps(),
+        step_count=_helper_call_count or None,
+        duration_seconds=time.monotonic() - start_time,
+        exit_code=0,
+    )
+
+
+def _run(args):
     if args and args[0] in {"-h", "--help"}:
         print(HELP)
         return
@@ -143,8 +292,6 @@ def main():
             sys.exit(2)
         _print_skill()
         return
-    if args and args[0] == "telemetry":
-        sys.exit(telemetry.run_telemetry_cli(args[1:]))
     if args and args[0] == "--update":
         yes = any(a in {"-y", "--yes"} for a in args[1:])
         sys.exit(run_update(yes=yes))
@@ -177,6 +324,7 @@ def main():
         ):
             start_remote_daemon(NAME)
         ensure_daemon()
+    _install_helper_trace()
     exec(code, globals())
 
 
