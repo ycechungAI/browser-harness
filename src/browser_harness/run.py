@@ -12,6 +12,7 @@ from .admin import (
     _version,
     NAME,
     daemon_alive,
+    daemon_browser_kind,
     ensure_daemon,
     list_cloud_profiles,
     list_local_profiles,
@@ -206,6 +207,12 @@ def _traced_steps():
     return _helper_trace or None
 
 
+def _telemetry_browser(task):
+    """'cloud' | 'cdp' | 'local', self-reported by the daemon the task ran on.
+    None when no browser was involved (non-script commands, daemon never up)."""
+    return daemon_browser_kind() if task else None
+
+
 def main():
     global _helper_call_count
     args = sys.argv[1:]
@@ -228,6 +235,7 @@ def main():
             action="error" if code else "completed",
             command=command,
             task=task,
+            browser=_telemetry_browser(task),
             output=stdout_tail.tail or None,
             output_length=stdout_tail.length or None,
             steps=_traced_steps(),
@@ -242,6 +250,7 @@ def main():
             action="error",
             command=command,
             task=task,
+            browser=_telemetry_browser(task),
             output=stdout_tail.tail or None,
             output_length=stdout_tail.length or None,
             steps=_traced_steps(),
@@ -258,6 +267,7 @@ def main():
         action="completed",
         command=command,
         task=task,
+        browser=_telemetry_browser(task),
         output=stdout_tail.tail or None,
         output_length=stdout_tail.length or None,
         steps=_traced_steps(),

@@ -239,6 +239,7 @@ def capture_cli_event(
     action: str,
     command: str,
     task: str | None = None,
+    browser: str | None = None,
     output: str | None = None,
     output_length: int | None = None,
     steps: list | None = None,
@@ -259,6 +260,8 @@ def capture_cli_event(
                 "$process_person_profile": True,
                 "action": action,
                 "command": command,
+                # 'cloud' | 'cdp' | 'local'
+                "browser": browser,
                 "client": os.environ.get("BH_CLIENT") or None,
                 "client_version": os.environ.get("BH_CLIENT_VERSION") or None,
                 "agent_client": _detect_agent_client(),

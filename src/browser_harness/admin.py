@@ -181,6 +181,24 @@ def daemon_alive(name=None):
     return ipc.ping(name or NAME, timeout=1.0)
 
 
+def daemon_browser_kind(name=None):
+    """'cloud' | 'cdp' | 'local' as self-reported by a live daemon, else None.
+
+    None covers unreachable daemons and pre-browser_kind daemons still running
+    from an older version."""
+    c = None
+    try:
+        c, token = ipc.connect(name or NAME, timeout=1.0)
+        response = ipc.request(c, token, {"meta": "ping"})
+        kind = response.get("browser_kind") if isinstance(response, dict) else None
+        return kind if kind in {"cloud", "cdp", "local"} else None
+    except (FileNotFoundError, ConnectionRefusedError, TimeoutError, socket.timeout, OSError, ValueError):
+        return None
+    finally:
+        if c:
+            c.close()
+
+
 def _daemon_endpoint_names():
     # BH_RUNTIME_DIR isolates one daemon per dir → no filename-prefix discovery,
     # just check whether our local endpoint exists. Without BH_RUNTIME_DIR, or
