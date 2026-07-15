@@ -27,7 +27,7 @@ from .admin import (
     stop_remote_daemon,
     sync_local_profile,
 )
-from . import auth, telemetry
+from . import auth, recorder, telemetry
 from .helpers import *
 
 HELP = """Browser Harness
@@ -156,6 +156,7 @@ def _traced(name, fn):
             entry["error"] = str(exc)[:300]
             raise
         entry["duration_seconds"] = round(time.monotonic() - step_start, 3)
+        recorder.observe(name, args, kwargs, entry["duration_seconds"])
         return result
 
     wrapper.__bh_traced__ = True

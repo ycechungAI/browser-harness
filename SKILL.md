@@ -93,6 +93,13 @@ Cloud profile cookie sync reference: https://github.com/browser-use/browser-harn
 - Login walls: stop and ask. Exception: use available SSO automatically when Chrome is already signed in; still stop for passwords, MFA, consent, or ambiguous account choice.
 - Raw CDP is available with `cdp("Domain.method", ...)`.
 
+## Recording Videos
+
+`start_recording(name, title=...)` records the session — one screenshot + one
+trace line per action, into a folder that survives across calls — until
+`stop_recording()`. To edit a recording into a short, engaging video, read
+https://github.com/browser-use/browser-harness/blob/main/interaction-skills/make-video.md.
+
 ## Interaction Skills
 
 If you get stuck on a browser mechanic, check https://github.com/browser-use/browser-harness/tree/main/interaction-skills.
@@ -105,6 +112,7 @@ If you get stuck on a browser mechanic, check https://github.com/browser-use/bro
 - drag-and-drop.md
 - dropdowns.md
 - iframes.md
+- make-video.md
 - network-requests.md
 - print-as-pdf.md
 - profile-sync.md
