@@ -71,6 +71,7 @@ const DRIFT_MAX = 0.9;             // zoom -> zoom drift duration cap
 const CUR_S = 0.42;
 const RADIUS = 12;
 const RAIL = H - 64;               // shared centerline: caption + chips sit on one rail
+const STAGE = 0.94;                // camera output inset — backdrop margin at any zoom
 const ACCENT = "#6ee7ff";
 const MONO = "ui-monospace, 'SF Mono', Menlo, monospace";
 const SANS = "'Helvetica Neue', ui-sans-serif, system-ui, -apple-system";
@@ -571,7 +572,7 @@ function drawCard(i, lt) {
   const rise = (1 - aIn) * 16;
   drawLogo(W / 2 - 40, H / 2 - 210 + rise, 80, INK, 1);
   ctx.fillStyle = INK; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.font = `400 84px ${SERIF}`;   // editorial serif, regular weight
+  ctx.font = `600 72px ${SANS}`;    // grotesk, semibold — Styrene-adjacent
   ctx.fillText(b.title || "", W / 2, H / 2 + 14 + rise);
   if (b.sub) {
     ctx.font = `500 23px ${MONO}`;
@@ -590,6 +591,10 @@ function draw() {
   if (beats[i].card) { drawCard(i, lt); drawHud(t, i); return; }
   const cam = camera(t);
   ctx.save();
+  // Stage inset: the camera's output maps to a slightly smaller rect so a
+  // margin of backdrop stays visible on every side at ANY zoom (Screen Studio
+  // keeps this breathing room; full-bleed content reads as a raw screencap).
+  ctx.translate(W / 2, H / 2); ctx.scale(STAGE, STAGE); ctx.translate(-W / 2, -H / 2);
   ctx.translate(W / 2 + (cam.shake || 0), H / 2); ctx.scale(cam.s, cam.s); ctx.translate(-cam.x, -cam.y);
   // Screen-Studio window entrance after a card
   if (i === firstWindowBeat) {
