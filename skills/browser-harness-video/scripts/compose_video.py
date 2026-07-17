@@ -10,9 +10,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from video_policy import OPAQUE_HEX, ROUTE_UNSAFE, VideoPolicyError, load_json as policy_load_json, used_frames
+
 
 SKILL = Path(__file__).resolve().parents[1]
-STYLE_PATH = SKILL / "assets" / "house-style-v9.json"
+STYLE_PATH = SKILL / "assets" / "house-style.json"
 ACTION_KEYS = {
     "event",
     "frameEvent",
@@ -25,6 +27,7 @@ ACTION_KEYS = {
     "detour",
     "error",
     "context",
+    "showTyping",
 }
 BRIEF_KEYS = {
     "task",
@@ -48,11 +51,7 @@ EXPLANATION_KEYS = {
 }
 TYPE_HELPERS = {"type_text", "fill", "fill_input"}
 CLICK_HELPERS = {"click_at_xy"}
-ROUTE_UNSAFE = re.compile(
-    r"@|[?#]|://|onmicrosoft|(?:tenant|user|object)[_-]?id|"
-    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
-    re.IGNORECASE,
-)
+REDACTION_KEYS = {"x", "y", "w", "h", "fill", "stroke", "radius", "pad"}
 
 
 class BriefError(ValueError):
@@ -61,12 +60,9 @@ class BriefError(ValueError):
 
 def load_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise BriefError(f"cannot read {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise BriefError(f"{path} must contain a JSON object")
-    return value
+        return policy_load_json(path)
+    except VideoPolicyError as exc:
+        raise BriefError(str(exc)) from exc
 
 
 def reject_unknown(value: dict[str, Any], allowed: set[str], where: str) -> None:
@@ -108,8 +104,8 @@ def validate_narration(value: Any, where: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise BriefError(f"{where} must be text")
-    if words(value) > 10:
-        raise BriefError(f"{where} exceeds ten words")
+    if words(value) > 7:
+        raise BriefError(f"{where} exceeds seven words")
     return value.strip()
 
 
@@ -141,6 +137,12 @@ def event_target(event: dict[str, Any]) -> dict[str, float] | None:
             "y": float(box["y"]) + float(box["h"]) / 2,
         }
     return None
+
+
+def require_matching_viewport(event: dict[str, Any], viewport: dict[str, Any], where: str) -> None:
+    candidate = event.get("viewport") or {}
+    if candidate.get("w") != viewport.get("w") or candidate.get("h") != viewport.get("h"):
+        raise BriefError(f"{where} uses a different viewport; split or normalize the recording first")
 
 
 def default_action_duration(beat: dict[str, Any], pacing: dict[str, Any]) -> float:
@@ -198,16 +200,21 @@ def compile_action(
     previous_target: dict[str, float] | None,
     viewport: dict[str, float],
     pacing: dict[str, Any],
+    revealed_text: dict[int, str],
 ) -> tuple[dict[str, Any], dict[str, float] | None]:
     if not isinstance(action, dict):
         raise BriefError(f"actions[{index}] must be an object")
     reject_unknown(action, ACTION_KEYS, f"actions[{index}]")
+    if "showTyping" in action and not isinstance(action["showTyping"], bool):
+        raise BriefError(f"actions[{index}].showTyping must be true or false")
     event = event_at(events, action.get("event"), f"actions[{index}].event")
+    require_matching_viewport(event, viewport, f"actions[{index}].event")
     frame_event = event
     if action.get("frameEvent") is not None:
         frame_event = event_at(
             events, action["frameEvent"], f"actions[{index}].frameEvent"
         )
+        require_matching_viewport(frame_event, viewport, f"actions[{index}].frameEvent")
     chapter = action.get("chapter")
     if not isinstance(chapter, int) or isinstance(chapter, bool) or not 0 <= chapter < len(plan):
         raise BriefError(f"actions[{index}].chapter must index plan")
@@ -223,6 +230,7 @@ def compile_action(
     after_number = action.get("afterEvent")
     if after_number is not None:
         after = event_at(events, after_number, f"actions[{index}].afterEvent")
+        require_matching_viewport(after, viewport, f"actions[{index}].afterEvent")
         beat["after"] = after["frame"]
         after_route = action.get("afterRoute")
         if after_route is not None:
@@ -250,18 +258,21 @@ def compile_action(
         beat["click"] = True
     elif helper in TYPE_HELPERS:
         box = event.get("box")
-        text = event.get("text")
-        if (
-            not isinstance(box, dict)
-            or not all(box.get(key) is not None for key in ("x", "y", "w", "h"))
-            or text is None
-        ):
-            raise BriefError(f"actions[{index}] identifies typing without a captured box and text")
+        if not isinstance(box, dict) or not all(box.get(key) is not None for key in ("x", "y", "w", "h")):
+            raise BriefError(f"actions[{index}] identifies typing without a captured box")
+        show_typing = action.get("showTyping") is True
+        if show_typing and event.get("password"):
+            raise BriefError(f"actions[{index}].showTyping cannot reveal a password field")
+        source_line = event.get("sourceLine")
+        if show_typing and source_line not in revealed_text:
+            raise BriefError(f"actions[{index}].showTyping requires the original typed event")
         beat["type"] = {
             "box": {key: box[key] for key in ("x", "y", "w", "h")},
-            "text": str(text),
-            **({"redact": True} if event.get("sensitive") else {}),
+            "text": revealed_text[source_line] if show_typing else "••••••",
+            **({} if show_typing else {"redact": True}),
         }
+    elif action.get("showTyping") is not None:
+        raise BriefError(f"actions[{index}].showTyping requires a typing event")
 
     target = event_target(event)
     if action.get("context") is True and not (beat.get("click") or beat.get("type")):
@@ -279,7 +290,42 @@ def compile_action(
     return beat, target or previous_target
 
 
-def compile_brief(summary: dict[str, Any], brief: dict[str, Any], style: dict[str, Any]) -> dict[str, Any]:
+def validate_privacy(reviewed: list[str], redact: dict[str, Any], composition: dict[str, Any]) -> None:
+    frames = used_frames(composition)
+    for frame in (*frames, *reviewed, *redact):
+        if Path(frame).name != frame or not frame.lower().endswith(".jpg"):
+            raise BriefError(f"invalid frame name: {frame}")
+    if len(reviewed) != len(set(reviewed)):
+        raise BriefError("privacy.reviewedFrames contains duplicates")
+    missing = [frame for frame in frames if frame not in reviewed]
+    if missing:
+        raise BriefError("privacy review missing: " + ", ".join(missing))
+    unknown = sorted(set(redact) - set(frames))
+    if unknown:
+        raise BriefError("privacy.redact lists unused frames: " + ", ".join(unknown))
+    for frame, rectangles in redact.items():
+        if not isinstance(rectangles, list):
+            raise BriefError(f"privacy.redact.{frame} must be a list")
+        for index, rectangle in enumerate(rectangles):
+            where = f"privacy.redact.{frame}[{index}]"
+            if not isinstance(rectangle, dict):
+                raise BriefError(f"{where} must be an object")
+            reject_unknown(rectangle, REDACTION_KEYS, where)
+            for key in ("x", "y", "w", "h"):
+                value = rectangle.get(key)
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+                    raise BriefError(f"{where}.{key} must be a finite number")
+            if rectangle["w"] <= 0 or rectangle["h"] <= 0:
+                raise BriefError(f"{where} must have positive width and height")
+            for key in ("fill", "stroke"):
+                value = rectangle.get(key)
+                if value is not None and value is not False and (
+                    not isinstance(value, str) or not OPAQUE_HEX.fullmatch(value)
+                ):
+                    raise BriefError(f"{where}.{key} must be false or opaque six-digit hex")
+
+
+def compile_brief(summary: dict[str, Any], brief: dict[str, Any], style: dict[str, Any], revealed_text: dict[int, str] | None = None) -> dict[str, Any]:
     reject_unknown(brief, BRIEF_KEYS, "edit brief")
     task = require_text(brief.get("task"), "task")
     summary_text = optional_text(brief.get("summary"), "summary")
@@ -291,11 +337,15 @@ def compile_brief(summary: dict[str, Any], brief: dict[str, Any], style: dict[st
     events = summary.get("events")
     if not isinstance(events, list) or not events:
         raise BriefError("recording-summary.json has no events")
-    viewport_event = next(
-        (event for event in events if (event.get("viewport") or {}).get("w") and (event.get("viewport") or {}).get("h")),
-        None,
+    first_action = actions[0]
+    if not isinstance(first_action, dict):
+        raise BriefError("actions[0] must be an object")
+    viewport_event = event_at(
+        events,
+        first_action.get("frameEvent", first_action.get("event")),
+        "actions[0].frameEvent" if "frameEvent" in first_action else "actions[0].event",
     )
-    if not viewport_event:
+    if not (viewport_event.get("viewport") or {}).get("w") or not (viewport_event.get("viewport") or {}).get("h"):
         raise BriefError("recording-summary.json has no viewport")
     viewport = viewport_event["viewport"]
     first_ts = next(
@@ -320,6 +370,7 @@ def compile_brief(summary: dict[str, Any], brief: dict[str, Any], style: dict[st
     pacing = style["pacing"]
     reading_wpm = float(style["readingWpm"])
     explanation_by_action: dict[int, list[dict[str, Any]]] = {}
+    revealed_text = revealed_text or {}
     for index, explanation in enumerate(explanations):
         if not isinstance(explanation, dict):
             raise BriefError(f"explanations[{index}] must be an object")
@@ -361,7 +412,7 @@ def compile_brief(summary: dict[str, Any], brief: dict[str, Any], style: dict[st
     previous_target = None
     for index, action in enumerate(actions):
         beat, previous_target = compile_action(
-            action, index, events, plan, first_ts, previous_target, viewport, pacing
+            action, index, events, plan, first_ts, previous_target, viewport, pacing, revealed_text
         )
         beats.append(beat)
         beats.extend(explanation_by_action.get(index + 1, []))
@@ -388,14 +439,14 @@ def compile_brief(summary: dict[str, Any], brief: dict[str, Any], style: dict[st
     duration = round(sum(float(beat["dur"]) for beat in beats), 3)
     if duration > budget + 0.001:
         raise BriefError(
-            f"compiled video is {duration:.1f}s; v{style['version']} budget is "
+            f"compiled video is {duration:.1f}s; house-style budget is "
             f"{budget:.1f}s. Shorten card copy, remove redundant actions, or set "
             "narration only when the thought changes; viewers can pause for detail"
         )
 
     house_privacy = style["privacy"]
-    return {
-        "houseStyleVersion": style["version"],
+    composition = {
+        "schemaVersion": style["version"],
         "viewport": {"w": viewport["w"], "h": viewport["h"]},
         "cursorStart": style["cursorStart"],
         "frameStyle": style["frameStyle"],
@@ -413,11 +464,33 @@ def compile_brief(summary: dict[str, Any], brief: dict[str, Any], style: dict[st
         "redact": redact,
         "beats": beats,
     }
+    validate_privacy(reviewed, redact, composition)
+    return composition
 
 
 def write_composition(path: Path, composition: dict[str, Any]) -> None:
     body = json.dumps(composition, indent=2, ensure_ascii=False)
     path.write_text(f"window.COMPOSITION = {body};\n", encoding="utf-8")
+
+
+def load_revealed_text(events_path: Path) -> dict[int, str]:
+    revealed: dict[int, str] = {}
+    try:
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise BriefError(f"cannot read {events_path}: {exc}") from exc
+    for source_line, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise BriefError(f"cannot read {events_path}: {exc}") from exc
+        if event.get("helper") in TYPE_HELPERS and event.get("input") != "password":
+            text = event.get("text")
+            if text is not None:
+                revealed[source_line] = str(text)
+    return revealed
 
 
 def main() -> int:
@@ -431,12 +504,12 @@ def main() -> int:
         summary = load_json(recording / "recording-summary.json")
         brief = load_json(recording / args.brief)
         style = load_json(STYLE_PATH)
-        composition = compile_brief(summary, brief, style)
+        composition = compile_brief(summary, brief, style, load_revealed_text(recording / "events.jsonl"))
         write_composition(recording / args.output, composition)
     except BriefError as exc:
         parser.error(str(exc))
     print(f"composition: {recording / args.output}")
-    print(f"house style: v{composition['houseStyleVersion']}")
+    print(f"schema: {composition['schemaVersion']}")
     print(f"beats: {len(composition['beats'])}")
     print(
         "duration: "

@@ -25,10 +25,12 @@ Do not invent a separate editing workflow.
 Recording and video creation require user intent. Treat any natural-language
 nudge such as “show me what you did,” “record this,” “make a video,” “demo it,”
 or “walk me through it” as opt-in; do not require exact wording. Significant
-work alone is not consent. Discover existing evidence with
-`./browser-harness recordings --latest`; never reenact a task. When a video was
-requested and subagents are available, delegate only video post-production so the
-primary agent can keep validating and handing off the requested result.
+work alone is not consent. For a video requested before browser work, call
+`start_recording()` before the first action and retain its exact returned path;
+never substitute `./browser-harness recordings --latest`. Use `--latest` only
+for a post-task request after verifying timestamps and pages. Never reenact a
+task. When a video was requested and subagents are available, delegate only
+post-production with the original task and exact recording path.
 
 An agent operating the harness only edits inside `agent-workspace/`:
 - `agent_helpers.py` — task-specific browser helpers the agent adds

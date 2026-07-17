@@ -272,8 +272,16 @@ def _capture(d, helper, args=(), kwargs=None, duration=None):
             event[k] = _scrub_url(event[k])
     try:
         shot = helpers.cdp("Page.captureScreenshot", format="jpeg", quality=80)
-        frame = f"{sum(1 for _ in d.glob('*.jpg')) + 1:04d}.jpg"
-        (d / frame).write_bytes(base64.b64decode(shot["data"]))
+        number = sum(1 for _ in d.glob("*.jpg")) + 1
+        data = base64.b64decode(shot["data"])
+        while True:
+            frame = f"{number:04d}.jpg"
+            try:
+                with (d / frame).open("xb") as output:
+                    output.write(data)
+                break
+            except FileExistsError:
+                number += 1
         event["frame"] = frame
     except Exception:
         pass

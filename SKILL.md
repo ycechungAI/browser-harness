@@ -117,8 +117,10 @@ exact keyword. Significant work alone is not consent.
 When the nudge arrives before browser work and background traces are off, call
 `start_recording(name, title=...)` before the first action and
 `stop_recording()` after the verified end state. This records only that task
-without changing the saved preference. Render a video when the user asks to
-see, watch, or share the work; otherwise return the requested raw recording.
+without changing the saved preference. Retain the exact directory returned by
+`start_recording()` and pass that path through post-production; never replace
+it with `recordings --latest`. Render a video when the user asks to see, watch,
+or share the work; otherwise return the requested raw recording.
 
 For a post-task request, find existing evidence through the CLI, never by
 guessing the workspace path or inspecting `BH_RECORD` yourself:
@@ -145,12 +147,11 @@ Use a bounded handoff such as: “Read `skills/browser-harness-video/SKILL.md`.
 Original task: … Recording: … Produce and verify the MP4 using only captured
 artifacts; do not browse, reenact, or change the completed task.”
 
-To edit a recording into a short, engaging video, read and follow the full
-guide before editing:
-https://github.com/browser-use/browser-harness/blob/main/interaction-skills/make-video.md.
-In this repository, use `skills/browser-harness-video/SKILL.md`; it initializes
-the canonical renderer and blocks inauthentic, unreadable, or unsafe exports.
-Do not improvise a different video template.
+To edit a recording into a short, engaging video, read
+`skills/browser-harness-video/SKILL.md` in a checkout, or the canonical guide
+linked from https://github.com/browser-use/browser-harness/blob/main/interaction-skills/make-video.md.
+It blocks inauthentic, unreadable, stale, or unsafe exports. Do not improvise
+a different video template.
 
 ## Interaction Skills
 

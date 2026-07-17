@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import json
 import math
 import os
@@ -18,23 +17,44 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+import compose_video
+from video_policy import SOURCE_MANIFEST, file_hash, load_composition as policy_load_composition, used_frames, verify_source_manifest
+
 
 ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE = ROOT / "interaction-skills" / "video-template.html"
 MARKER = "__BH_VIDEO_RESULT__="
+REVIEW_ARTIFACTS = {
+    "composition.js",
+    "recording-summary.json",
+    "edit-brief.json",
+    SOURCE_MANIFEST,
+    "video.html",
+}
+OBSOLETE_REVIEW_FILES = {
+    "privacy-contact-sheet.jpg",
+    "renderer-normal-contact-sheet.jpg",
+    "renderer-reduced-contact-sheet.jpg",
+    "renderer-click-contact-sheet.jpg",
+    "video-audit.json",
+}
 
 
 def load_composition(recording: Path) -> dict:
-    path = recording / "composition.js"
-    text = path.read_text(encoding="utf-8").strip()
-    prefix = "window.COMPOSITION ="
-    if not text.startswith(prefix):
-        raise RuntimeError(f"{path} is not a generated composition")
-    return json.loads(text[len(prefix):].strip().removesuffix(";"))
+    return policy_load_composition(recording / "composition.js")
 
 
-def file_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def compile_recording(recording: Path, write: bool) -> dict:
+    verify_source_manifest(recording)
+    summary = compose_video.load_json(recording / "recording-summary.json")
+    brief = compose_video.load_json(recording / "edit-brief.json")
+    style = compose_video.load_json(compose_video.STYLE_PATH)
+    composition = compose_video.compile_brief(
+        summary, brief, style, compose_video.load_revealed_text(recording / "events.jsonl")
+    )
+    if write:
+        compose_video.write_composition(recording / "composition.js", composition)
+    return composition
 
 
 def review_samples(comp: dict) -> list[dict]:
@@ -193,24 +213,62 @@ def contact_sheet(captures: list[dict], output: Path, title: str) -> None:
     sheet.save(output, quality=91)
 
 
-def _audit_ready(recording: Path) -> dict:
-    audit_path = recording / "video-audit.json"
-    composition = recording / "composition.js"
-    if not audit_path.is_file():
-        raise RuntimeError("run audit_video.py before renderer review")
-    audit = json.loads(audit_path.read_text(encoding="utf-8"))
-    if audit.get("errors"):
-        raise RuntimeError("video audit has blocking errors")
-    if audit_path.stat().st_mtime_ns < composition.stat().st_mtime_ns:
-        raise RuntimeError("video audit is older than composition.js; rerun it")
-    return audit
+def masked_frame(recording: Path, comp: dict, frame: str) -> Image.Image:
+    viewport = comp["viewport"]
+    vw, vh = float(viewport["w"]), float(viewport["h"])
+    redactions = comp.get("redact") or {}
+    privacy = comp.get("privacy") or {}
+    mask = privacy.get("mask") or {}
+    pad = float(privacy.get("pad") or 8)
+    image = Image.open(recording / frame).convert("RGB")
+    sx, sy = image.width / vw, image.height / vh
+    draw = ImageDraw.Draw(image)
+    for rectangle in redactions.get(frame, []):
+        rect_pad = float(rectangle.get("pad", pad))
+        x0 = max(0, (float(rectangle["x"]) - rect_pad) * sx)
+        y0 = max(0, (float(rectangle["y"]) - rect_pad) * sy)
+        x1 = min(image.width, (float(rectangle["x"]) + float(rectangle["w"]) + rect_pad) * sx)
+        y1 = min(image.height, (float(rectangle["y"]) + float(rectangle["h"]) + rect_pad) * sy)
+        fill = rectangle.get("fill", mask.get("fill", "#f2f4f7"))
+        stroke = rectangle.get("stroke", mask.get("stroke", "#e2e7ec"))
+        radius = float(rectangle.get("radius", mask.get("radius", 7))) * min(sx, sy)
+        draw.rounded_rectangle(
+            (x0, y0, x1, y1), radius=radius, fill=fill,
+            outline=stroke or None, width=max(1, round(min(sx, sy))),
+        )
+    return image
+
+
+def privacy_review(recording: Path, comp: dict) -> tuple[Path, list[dict]]:
+    review_dir = recording / ".privacy-review"
+    review_dir.mkdir(exist_ok=True)
+    for stale in review_dir.glob("*.jpg"):
+        stale.unlink()
+    captures = []
+    redactions = comp.get("redact") or {}
+    for frame in used_frames(comp):
+        source = recording / frame
+        if not source.is_file():
+            raise RuntimeError(f"missing frame: {frame}")
+        output = review_dir / frame
+        masked_frame(recording, comp, frame).save(output, quality=94)
+        captures.append(
+            {
+                "path": str(output),
+                "time": 0,
+                "label": f"privacy · {frame} · masks:{len(redactions.get(frame, []))}",
+            }
+        )
+    return review_dir, captures
 
 
 def review(recording: Path) -> int:
     started = time.monotonic()
-    audit = _audit_ready(recording)
-    comp = load_composition(recording)
+    for name in OBSOLETE_REVIEW_FILES:
+        (recording / name).unlink(missing_ok=True)
+    comp = compile_recording(recording, write=True)
     shutil.copy2(TEMPLATE, recording / "video.html")
+    privacy_dir, privacy_captures = privacy_review(recording, comp)
     samples = review_samples(comp)
     review_dir = recording / ".renderer-review"
     review_dir.mkdir(exist_ok=True)
@@ -220,38 +278,43 @@ def review(recording: Path) -> int:
         result = _review_browser(recording, url, samples)
 
     errors = []
+    warnings = []
+    all_captures = list(privacy_captures)
     for mode in ("normal", "reduced"):
         errors.extend(f"{mode}: {error}" for error in result[mode]["preflight"].get("errors", []))
+        warnings.extend(
+            f"{mode}: {warning}"
+            for warning in result[mode]["preflight"].get("warnings", [])
+        )
         errors.extend(
             f"{mode}: beat {click['beat']} click is outside the safe viewport"
             for click in result[mode]["clicks"] if not click.get("visible")
         )
-        sheet = recording / f"renderer-{mode}-contact-sheet.jpg"
-        contact_sheet(result[mode]["captures"], sheet, f"{mode.upper()} MOTION — EVERY BEAT")
-        result[mode]["contactSheet"] = str(sheet)
+        for capture in result[mode]["captures"]:
+            all_captures.append({**capture, "label": f"{mode} · {capture['label']}"})
+        for capture in result[mode]["clickCaptures"]:
+            all_captures.append({**capture, "label": f"{mode} · {capture['label']}"})
 
-    click_captures = result["normal"]["clickCaptures"] + result["reduced"]["clickCaptures"]
-    click_sheet = recording / "renderer-click-contact-sheet.jpg"
-    if click_captures:
-        contact_sheet(click_captures, click_sheet, "EXACT CLICK + RESULT STATES")
+    sheet = recording / "video-review-contact-sheet.jpg"
+    contact_sheet(all_captures, sheet, "PRIVACY · EVERY BEAT · EXACT CLICK + RESULT")
 
     report = {
         "errors": errors,
-        "warnings": audit.get("warnings", []),
+        "warnings": warnings,
         "duration": round(sum(float(beat.get("dur") or 0) for beat in comp.get("beats") or []), 3),
-        "compositionMtimeNs": (recording / "composition.js").stat().st_mtime_ns,
-        "rendererSha256": file_hash(recording / "video.html"),
+        "artifactHashes": {
+            name: file_hash(recording / name) for name in sorted(REVIEW_ARTIFACTS)
+        },
         "normal": result["normal"],
         "reduced": result["reduced"],
-        "clickContactSheet": str(click_sheet) if click_captures else None,
+        "contactSheet": str(sheet),
+        "privacyReviewDir": str(privacy_dir),
         "elapsedSeconds": round(time.monotonic() - started, 3),
     }
     report_path = recording / "renderer-review.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"normal review:  {result['normal']['contactSheet']}")
-    print(f"reduced review: {result['reduced']['contactSheet']}")
-    if click_captures:
-        print(f"click review:   {click_sheet}")
+    print(f"review sheet: {sheet}")
+    print(f"full-resolution privacy review: {privacy_dir}")
     print(f"renderer review: {len(errors)} error(s) in {report['elapsedSeconds']:.1f}s")
     return 1 if errors else 0
 
@@ -318,7 +381,7 @@ def _probe(path: Path) -> dict:
 
 def export(recording: Path, output_name: str, reviewed: bool) -> int:
     if not reviewed:
-        raise RuntimeError("inspect every renderer contact sheet, then rerun with --reviewed")
+        raise RuntimeError("inspect the review sheet and full-resolution privacy frames, then rerun with --reviewed")
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("ffmpeg and ffprobe are required")
     review_path = recording / "renderer-review.json"
@@ -327,12 +390,19 @@ def export(recording: Path, output_name: str, reviewed: bool) -> int:
     review_report = json.loads(review_path.read_text(encoding="utf-8"))
     if review_report.get("errors"):
         raise RuntimeError("renderer review has blocking errors")
+    verify_source_manifest(recording)
     comp = load_composition(recording)
-    if review_report.get("compositionMtimeNs") != (recording / "composition.js").stat().st_mtime_ns:
-        raise RuntimeError("renderer review is stale; rerun it")
+    expected_comp = compile_recording(recording, write=False)
+    if comp != expected_comp:
+        raise RuntimeError("composition.js is not the current compiled brief; rerun review")
+    artifact_hashes = review_report.get("artifactHashes") or {}
+    if set(artifact_hashes) != REVIEW_ARTIFACTS:
+        raise RuntimeError("renderer review lacks content hashes; rerun it")
+    for name, expected_hash in artifact_hashes.items():
+        path = recording / name
+        if not path.is_file() or file_hash(path) != expected_hash:
+            raise RuntimeError(f"{name} changed after review; rerun it")
     renderer = recording / "video.html"
-    if not renderer.is_file() or review_report.get("rendererSha256") != file_hash(renderer):
-        raise RuntimeError("renderer changed after review; rerun it")
     if file_hash(renderer) != file_hash(TEMPLATE):
         raise RuntimeError("renderer is not the current shared template; rerun review")
 
