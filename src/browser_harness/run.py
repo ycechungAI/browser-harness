@@ -27,7 +27,7 @@ from .admin import (
     stop_remote_daemon,
     sync_local_profile,
 )
-from . import auth, telemetry
+from . import auth, recorder, telemetry
 from .helpers import *
 
 HELP = """Browser Harness
@@ -52,6 +52,13 @@ Commands:
   browser-harness auth status         show Browser Use Cloud auth state
   browser-harness auth logout         remove stored Browser Use Cloud auth
   browser-harness skill               print the browser-harness skill text
+  browser-harness recordings          show recording status and recent sessions
+  browser-harness recordings --latest   print the newest recording directory
+  browser-harness recordings enable   save browser actions locally by default
+  browser-harness recordings disable  stop saving browser actions by default
+  browser-harness video init <recording>      prepare a recording for editing
+  browser-harness video review <recording>    compile and review the video
+  browser-harness video export <recording> --reviewed   export a verified MP4
   browser-harness telemetry status    show anonymous telemetry opt-out state
   browser-harness --update [-y]    pull the latest version (agents: pass -y)
   browser-harness --reload         stop the daemon so next call picks up code changes
@@ -115,7 +122,7 @@ def _telemetry_command(args):
         return "reload"
     if first == "--debug-clicks":
         return "debug-clicks"
-    if first in {"auth", "skill", "telemetry"}:
+    if first in {"auth", "skill", "recordings", "telemetry", "video"}:
         return first
     return "usage"
 
@@ -156,6 +163,7 @@ def _traced(name, fn):
             entry["error"] = str(exc)[:300]
             raise
         entry["duration_seconds"] = round(time.monotonic() - step_start, 3)
+        recorder.observe(name, args, kwargs, entry["duration_seconds"])
         return result
 
     wrapper.__bh_traced__ = True
@@ -310,6 +318,34 @@ def _run(args):
             sys.exit(2)
         _print_skill()
         return
+    if args and args[0] == "recordings":
+        rest = args[1:]
+        if rest == ["--latest"]:
+            latest = recorder.latest_recording()
+            if latest is None:
+                print("no recordings found", file=sys.stderr)
+                sys.exit(1)
+            print(latest)
+            return
+        if rest in (["enable"], ["disable"]):
+            enabled = rest == ["enable"]
+            recorder.set_auto_recording(enabled)
+            print(f"auto-recording preference {'enabled' if enabled else 'disabled'}")
+            return
+        if rest:
+            print("usage: browser-harness recordings [--latest|enable|disable]", file=sys.stderr)
+            sys.exit(2)
+        enabled, source = recorder.auto_recording_setting()
+        print(f"auto-recording: {'on' if enabled else 'off'} ({source})")
+        active = recorder.recording_dir()
+        print(f"active: {active or 'none'}")
+        recent = recorder.recordings()
+        print(f"latest: {recent[0] if recent else 'none'}")
+        return
+    if args and args[0] == "video":
+        from . import video
+
+        sys.exit(video.run_cli(args[1:]))
     if args and args[0] == "--update":
         yes = any(a in {"-y", "--yes"} for a in args[1:])
         sys.exit(run_update(yes=yes))

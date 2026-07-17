@@ -490,6 +490,11 @@ def http_get(url, headers=None, timeout=20.0):
         return data.decode()
 
 
+# Imported at the bottom so recorder's own `from . import helpers` sees a
+# fully-defined module. Exposes the recording helpers via `from .helpers import *`.
+from .recorder import start_recording, stop_recording, recording_dir
+
+
 def _load_agent_helpers():
     p = AGENT_WORKSPACE / "agent_helpers.py"
     if not p.exists():
